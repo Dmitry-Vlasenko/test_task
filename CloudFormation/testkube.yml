@@ -1,0 +1,205 @@
+---
+Parameters:
+
+  KeyName:
+    Description: The EC2 Key Pair to allow SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+Metadata:
+
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Worker Node Configuration
+        Parameters:
+          - KeyName
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Amazon EKS Cluster Role"
+Mappings:
+  ServicePrincipals:
+    aws-cn:
+      ec2: ec2.amazonaws.com.cn
+    aws-us-gov:
+      ec2: ec2.amazonaws.com
+    aws:
+      ec2: ec2.amazonaws.com
+
+#==================IAM Role=========================
+Resources:
+  eksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  NodeInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !FindInMap [ServicePrincipals, !Ref "AWS::Partition", ec2]
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEKS_CNI_Policy"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+      Path: /
+  #====================Repository=====================
+  MyRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: "testnginxkub"
+  #======================vps===========================
+  myVPCDmitryVlasenko:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: "true"
+  #=====================subnet pablik and prived =====================
+  mySubnetpablik:
+    Type: AWS::EC2::Subnet
+    Properties:
+      MapPublicIpOnLaunch: true
+      VpcId:
+        Ref: myVPCDmitryVlasenko
+      CidrBlock: 10.0.0.0/18
+      AvailabilityZone: eu-central-1a
+
+  mySubnetpablik2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      MapPublicIpOnLaunch: true
+      VpcId:
+        Ref: myVPCDmitryVlasenko
+      CidrBlock: 10.0.64.0/18
+      AvailabilityZone: eu-central-1b
+  #=====InternetGateway==========================
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+
+  VPCGatewayAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref myVPCDmitryVlasenko
+
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref myVPCDmitryVlasenko
+
+  Route:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: 
+        Ref: RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: 
+        Ref: InternetGateway
+
+  #================================Routtable==================================
+  
+  Subnet1RouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref mySubnetpablik
+      RouteTableId: !Ref RouteTable
+  Subnet02RouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref mySubnetpablik2
+      RouteTableId: !Ref RouteTable
+  #===============================NodeSecurityGroup==============================
+  allowtraffic:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for all nodes in the cluster
+      VpcId: !Ref myVPCDmitryVlasenko
+  
+  NodeSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      CidrIp: 0.0.0.0/0
+      Description: Allow node to communicate with each other
+      GroupId: !Ref allowtraffic
+      IpProtocol: -1
+      FromPort: 0
+      ToPort: 65535
+
+  NodeSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      CidrIp: 0.0.0.0/0
+      Description: Allow node to communicate with each other
+      GroupId: !Ref allowtraffic
+      IpProtocol: -1
+      FromPort: 0
+      ToPort: 65535
+  #==================================Claster=====================================
+  myCluster:
+    Type: "AWS::EKS::Cluster"
+    Properties:
+      Name: testkube
+      Version: "1.17"
+      RoleArn: !GetAtt eksClusterRole.Arn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref allowtraffic
+        SubnetIds:
+          - !Ref mySubnetpablik
+          - !Ref mySubnetpablik2
+  #================================Node==========================================
+  EKSNodegroup:
+    Type: 'AWS::EKS::Nodegroup'
+    Properties:
+      ClusterName: !Ref myCluster
+      InstanceTypes: 
+        - t3.micro
+      NodeRole: !GetAtt NodeInstanceRole.Arn
+      NodegroupName: !Ref myCluster
+      RemoteAccess: 
+        Ec2SshKey: !Ref KeyName
+        SourceSecurityGroups: 
+          - !Ref allowtraffic
+
+      ScalingConfig:
+        MinSize: 1
+        DesiredSize: 1
+        MaxSize: 2
+      Subnets:
+        - !Ref mySubnetpablik
+        - !Ref mySubnetpablik2
+#
+#
+#
+#
+#
+#===============================================================================
+
+Outputs:
+  RoleArn:
+    Description: The role that Amazon EKS will use to create AWS resources for Kubernetes clusters
+    Value: !GetAtt eksClusterRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-RoleArn"
+  NodeInstanceRole:
+    Description: The node instance role
+    Value: !GetAtt NodeInstanceRole.Arn
+  NodeInstanceRole:
+    Description: The node instance role
+    Value: !GetAtt NodeInstanceRole.Arn
